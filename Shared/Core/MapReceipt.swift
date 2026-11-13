@@ -1,5 +1,21 @@
 import Foundation
 
+struct NavigationSettings: Codable, Equatable {
+    static let key = "runnersNavigationSettings"
+    var version = UUID()
+    var junctionHaptics = true
+    var offRouteHaptics = true
+
+    static func load() -> Self? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(Self.self, from: data)
+    }
+
+    func save() throws {
+        UserDefaults.standard.set(try JSONEncoder().encode(self), forKey: Self.key)
+    }
+}
+
 struct MapReceipt: Codable {
     let routeID: UUID
     let checksum: String

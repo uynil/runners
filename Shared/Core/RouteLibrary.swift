@@ -22,6 +22,24 @@ struct PlannedRoute: Codable, Identifiable, Equatable {
     var isFavorite = false
     var cues: [RouteCue]? = nil
     var cuesUpdatedAt: Date? = nil
+    var isReversed: Bool? = nil
+
+    mutating func reverseDirection() {
+        let length = distanceMeters
+        segments = segments.reversed().map { Array($0.reversed()) }
+        cues = cues?.reversed().map { cue in
+            let turn: String
+            switch cue.turn {
+            case "left": turn = "right"
+            case "right": turn = "left"
+            default: turn = cue.turn
+            }
+            return RouteCue(id: cue.id, progressMeters: max(0, length - cue.progressMeters),
+                            coordinate: cue.coordinate, turn: turn, name: cue.name, confirmed: cue.confirmed)
+        }.sorted { $0.progressMeters < $1.progressMeters }
+        isReversed = !(isReversed ?? false)
+        cuesUpdatedAt = Date()
+    }
 
     var distanceMeters: Double {
         segments.reduce(0) { total, segment in

@@ -201,6 +201,13 @@ private struct RouteDetailView: View {
                     LabeledContent("位置点", value: "\(route.pointCount)")
                     LabeledContent("来源文件", value: route.sourceName)
                     LabeledContent("爬升", value: "暂无有效数据")
+                    LabeledContent("导航方向", value: route.isReversed == true ? "反向" : "原始方向")
+                    Button("反转导航方向", systemImage: "arrow.left.arrow.right") {
+                        var updated = route
+                        updated.reverseDirection()
+                        store.update(updated)
+                    }
+                    .disabled(maps.isBusy(id))
                 }
                 Section {
                     Label("线路已保存在手机", systemImage: "checkmark.circle")
@@ -311,12 +318,17 @@ private struct WatchManagementView: View {
 }
 
 private struct PhoneSettingsView: View {
+    @EnvironmentObject private var watch: WatchConnection
     @AppStorage("mapEndpoint") private var mapEndpoint = OfflineMapStore.endpointString
     var body: some View {
         List {
             Section("当前版本") {
                 LabeledContent("距离单位", value: "公里")
-                LabeledContent("导航提醒", value: "尚未接入设置同步")
+                Toggle("路口震动", isOn: Binding(get: { watch.navigationSettings.junctionHaptics },
+                                                 set: { watch.updateNavigationSettings(junctionHaptics: $0) }))
+                Toggle("偏航震动", isOn: Binding(get: { watch.navigationSettings.offRouteHaptics },
+                                                 set: { watch.updateNavigationSettings(offRouteHaptics: $0) }))
+                LabeledContent("Watch 导航设置", value: watch.navigationSettingsStatus)
                 NavigationLink("Strava 连接与上传") { StravaSettingsView() }
             }
             Section("数据与权限") {

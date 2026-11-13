@@ -23,6 +23,7 @@ final class WorkoutRecorder: NSObject, ObservableObject {
     @Published private(set) var navigationError: String?
     @Published private(set) var navigationCue: NavigationCueNotice?
     private var cueTrigger = NavigationCueTrigger()
+    private var navigationSettings = NavigationSettings()
 
     private let healthStore = HKHealthStore()
     private let locationManager = CLLocationManager()
@@ -185,6 +186,7 @@ final class WorkoutRecorder: NSObject, ObservableObject {
             lastEnergyDate = nil
             recordEvent("start", at: now)
             navigator = navigationRoute.map { RouteNavigator(route: $0) }
+            navigationSettings = NavigationSettings.load() ?? NavigationSettings()
             navigationResult = nil
             navigationCue = nil
             cueTrigger = NavigationCueTrigger()
@@ -333,10 +335,14 @@ final class WorkoutRecorder: NSObject, ObservableObject {
             let now = Date()
             if fix.timestamp >= startedAt {
                 navigationResult = navigator?.consume(fix, receivedAt: now)
-                if navigationResult?.shouldAlert == true { WKInterfaceDevice.current().play(.notification) }
+                if navigationSettings.offRouteHaptics, navigationResult?.shouldAlert == true {
+                    WKInterfaceDevice.current().play(.notification)
+                }
                 if let result = navigationResult {
                     navigationCue = cueTrigger.consume(result, cues: navigationRoute?.cues ?? [])
-                    if navigationCue?.shouldAlert == true { WKInterfaceDevice.current().play(.notification) }
+                    if navigationSettings.junctionHaptics, navigationCue?.shouldAlert == true {
+                        WKInterfaceDevice.current().play(.notification)
+                    }
                 }
             }
             let accepted: Bool

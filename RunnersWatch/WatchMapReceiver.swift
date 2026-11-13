@@ -9,6 +9,7 @@ final class WatchMapReceiver: NSObject, ObservableObject, WCSessionDelegate {
     @Published private(set) var error: String?
     private let session: WCSession?
     private var activityProtected = true
+    private var pendingNavigationSettings: NavigationSettings?
     private static var removalURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Runners/map-removals.json")
@@ -45,7 +46,23 @@ final class WatchMapReceiver: NSObject, ObservableObject, WCSessionDelegate {
 
     func setActivityProtected(_ value: Bool) {
         activityProtected = value
-        if !value { processRemovals() }
+        if !value { applyNavigationSettings(); processRemovals() }
+    }
+
+    private func receiveNavigationSettings(_ data: Data?) {
+        guard let data, let settings = try? JSONDecoder().decode(NavigationSettings.self, from: data),
+              settings.version != NavigationSettings.load()?.version else { return }
+        pendingNavigationSettings = settings
+        applyNavigationSettings()
+    }
+
+    private func applyNavigationSettings() {
+        guard !activityProtected, let settings = pendingNavigationSettings else { return }
+        do {
+            try settings.save()
+            pendingNavigationSettings = nil
+            acknowledge()
+        } catch { self.error = "导航设置保存失败，等待重试。" }
     }
 
     private func processRemovals() {
@@ -125,9 +142,11 @@ final class WatchMapReceiver: NSObject, ObservableObject, WCSessionDelegate {
             let available = (attributes?[.systemFreeSize] as? NSNumber)?.int64Value
             let report = MapStorageReport(mapBytes: used, availableBytes: available, reportedAt: Date(), supportedMapSchema: 2)
             let removals = try MapRemovalQueue.load(from: Self.removalURL).results
-            try session?.updateApplicationContext(["mapReceipts": JSONEncoder().encode(receipts),
-                                                   "mapStorage": JSONEncoder().encode(report),
-                                                   "mapRemovals": JSONEncoder().encode(removals)])
+            var context: [String: Any] = ["mapReceipts": try JSONEncoder().encode(receipts),
+                                          "mapStorage": try JSONEncoder().encode(report),
+                                          "mapRemovals": try JSONEncoder().encode(removals)]
+            if let settings = NavigationSettings.load() { context["navigationSettingsApplied"] = settings.version.uuidString }
+            try session?.updateApplicationContext(context)
         } catch { self.error = "回执待重试：\(error.localizedDescription)" }
     }
 
@@ -147,8 +166,12 @@ final class WatchMapReceiver: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
-        guard let data = applicationContext["activityReceipts"] as? Data else { return }
-        Task { @MainActor in self.activities.receive(["activityReceipts": data]) }
+        let receipts = applicationContext["activityReceipts"] as? Data
+        let settings = applicationContext["navigationSettings"] as? Data
+        Task { @MainActor in
+            if let receipts { self.activities.receive(["activityReceipts": receipts]) }
+            self.receiveNavigationSettings(settings)
+        }
     }
     nonisolated func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
         guard fileTransfer.file.metadata?["kind"] as? String == "activity", error != nil else { return }
@@ -157,8 +180,12 @@ final class WatchMapReceiver: NSObject, ObservableObject, WCSessionDelegate {
 
     nonisolated func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         let message = error?.localizedDescription
+        let settings = session.receivedApplicationContext["navigationSettings"] as? Data
         Task { @MainActor in
-            if let message { self.error = message } else { self.reload(); self.acknowledge(); self.syncActivities() }
+            if let message { self.error = message } else {
+                self.receiveNavigationSettings(settings)
+                self.reload(); self.acknowledge(); self.syncActivities()
+            }
         }
     }
     nonisolated func sessionReachabilityDidChange(_ session: WCSession) {

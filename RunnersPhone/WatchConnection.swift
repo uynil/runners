@@ -14,6 +14,8 @@ final class WatchConnection: NSObject, ObservableObject, WCSessionDelegate {
     @Published private(set) var transfers: [UUID: String] = [:]
     @Published private(set) var storageReport: MapStorageReport?
     @Published private(set) var removals: [UUID: String] = [:]
+    @Published private(set) var navigationSettings = NavigationSettings.load() ?? NavigationSettings()
+    @Published private var appliedNavigationSettings: UUID?
     private var pendingRemovals: [UUID: MapRemovalCommand] = [:]
     let activities = PhoneActivityStore()
     private let session: WCSession?
@@ -25,6 +27,7 @@ final class WatchConnection: NSObject, ObservableObject, WCSessionDelegate {
     override init() {
         session = WCSession.isSupported() ? WCSession.default : nil
         super.init()
+        try? navigationSettings.save()
         if let data = UserDefaults.standard.data(forKey: "pendingMapRemovals"),
            let pending = try? JSONDecoder().decode([UUID: MapRemovalCommand].self, from: data) {
             pendingRemovals = pending
@@ -176,6 +179,7 @@ final class WatchConnection: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     private func receive(_ context: [String: Any]) {
+        appliedNavigationSettings = (context["navigationSettingsApplied"] as? String).flatMap(UUID.init(uuidString:))
         if let data = context["mapRemovals"] as? Data, let decoded = try? JSONDecoder().decode([MapRemovalReceipt].self, from: data) {
             for receipt in decoded where pendingRemovals[receipt.mapID]?.id == receipt.commandID {
                 removals[receipt.mapID] = receipt.message
@@ -211,12 +215,33 @@ final class WatchConnection: NSObject, ObservableObject, WCSessionDelegate {
         #endif
     }
 
+    var navigationSettingsStatus: String {
+        guard activated, paired, installed else { return "等待 Watch 连接" }
+        return appliedNavigationSettings == navigationSettings.version ? "Watch 已应用" : "等待 Watch 应用"
+    }
+
+    func updateNavigationSettings(junctionHaptics: Bool? = nil, offRouteHaptics: Bool? = nil) {
+        var updated = navigationSettings
+        updated.version = UUID()
+        updated.junctionHaptics = junctionHaptics ?? updated.junctionHaptics
+        updated.offRouteHaptics = offRouteHaptics ?? updated.offRouteHaptics
+        do {
+            try updated.save()
+            navigationSettings = updated
+            if activated { acknowledgeActivities() }
+        } catch { self.error = "无法保存导航设置。" }
+    }
+
     private func acknowledgeActivities() {
         activities.reload()
         do {
             let receipts = Array(activities.entries.prefix(100)).map(\.receipt)
-            try session?.updateApplicationContext(["activityReceipts": JSONEncoder().encode(receipts)])
-        } catch { activities.error = "运动接收回执待重试。" }
+            let context = ["activityReceipts": try JSONEncoder().encode(receipts),
+                           "navigationSettings": try JSONEncoder().encode(navigationSettings)]
+            if let session, (session.applicationContext as NSDictionary) != (context as NSDictionary) {
+                try session.updateApplicationContext(context)
+            }
+        } catch { activities.error = "运动接收回执与导航设置同步待重试。" }
     }
 
     nonisolated func session(_ session: WCSession, didReceive file: WCSessionFile) {
@@ -253,11 +278,13 @@ final class WatchConnection: NSObject, ObservableObject, WCSessionDelegate {
         let data = applicationContext["mapReceipts"] as? Data
         let storage = applicationContext["mapStorage"] as? Data
         let removals = applicationContext["mapRemovals"] as? Data
+        let settings = applicationContext["navigationSettingsApplied"] as? String
         Task { @MainActor in
             var context: [String: Any] = [:]
             if let data { context["mapReceipts"] = data }
             if let storage { context["mapStorage"] = storage }
             if let removals { context["mapRemovals"] = removals }
+            if let settings { context["navigationSettingsApplied"] = settings }
             self.receive(context)
         }
     }
@@ -292,6 +319,7 @@ final class WatchConnection: NSObject, ObservableObject, WCSessionDelegate {
             self.receipts = [:]
             self.transfers = [:]
             self.storageReport = nil
+            self.appliedNavigationSettings = nil
             self.removals = [:]
             self.pendingRemovals = [:]
             UserDefaults.standard.removeObject(forKey: "pendingMapRemovals")
