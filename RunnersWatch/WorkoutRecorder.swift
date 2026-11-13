@@ -113,6 +113,21 @@ final class WorkoutRecorder: NSObject, ObservableObject {
         } catch { navigationError = error.localizedDescription }
     }
 
+    func updateSelectedRoute(from bundles: [RouteMapBundle]) {
+        guard phase == .idle || phase == .finished, let id = navigationRoute?.id,
+              let route = bundles.first(where: { $0.id == id })?.route,
+              let updatedAt = route.cuesUpdatedAt else { return }
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("navigation-route.json")
+        guard let data = try? Data(contentsOf: url),
+              let current = try? JSONDecoder().decode(PlannedRoute.self, from: data),
+              updatedAt > (current.cuesUpdatedAt ?? .distantPast) else { return }
+        do {
+            try JSONEncoder().encode(route).write(to: url, options: .atomic)
+            reloadNavigationRoute()
+        } catch { navigationError = error.localizedDescription }
+    }
+
     func elapsed(at date: Date) -> Double {
         guard let summary else { return 0 }
         return max(0, (summary.endedAt ?? date).timeIntervalSince(summary.startedAt))

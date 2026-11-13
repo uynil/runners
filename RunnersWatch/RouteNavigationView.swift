@@ -158,7 +158,7 @@ struct RouteNavigationView: View {
                 }.monospacedDigit().padding(.horizontal, 12).padding(.vertical, 4).background(.black.opacity(0.95))
             }
             if let fix = recorder.lastFix, let map = bundle?.map,
-               RunReadout.gpsFresh(recorder, at: now), !map.bounds.contains(RoutePoint(latitude: fix.latitude, longitude: fix.longitude)) {
+               RunReadout.gpsFresh(recorder, at: now), !map.covers(RoutePoint(latitude: fix.latitude, longitude: fix.longitude)) {
                 Text("已超出离线地图范围").font(.system(size: 10, weight: .bold)).padding(5)
                     .foregroundStyle(.yellow).background(.black.opacity(0.85), in: Capsule())
             }

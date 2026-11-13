@@ -3,7 +3,7 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// OSM geometry is fetched as one bounded region, never as scraped image tiles.
+/// Fetch bounded OSM geometry regions and keep verified responses for retries.
 struct OSMRegionDownloader {
     typealias Fetch = (URLRequest, Int) async throws -> Data
     var fetch: Fetch = Self.fetchData
@@ -26,21 +26,39 @@ struct OSMRegionDownloader {
 
     func download(job: MapDownloadJob, endpoint: URL, storage: MapJobStorage,
                   progress: (Int, Int, Int64) async throws -> Void) async throws -> RouteMapBundle {
-        let (request, _) = try MapDownloader.request(bounds: job.bounds, endpoint: endpoint)
-        try Task.checkCancellation()
-        let cached = try storage.cachedTile(job.id, Self.regionKey)
-        let data: Data
-        if let cached { data = cached }
-        else { data = try await fetch(request, Self.maximumResponseBytes) }
-        guard data.count <= Self.maximumResponseBytes else { throw MapError.invalid("区域数据超过 4 MB，请缩小范围。") }
-        let parsed = try OfflineMap.parse(data, bounds: job.bounds, sourceURL: endpoint.absoluteString)
-        let map = OfflineMap(bounds: job.bounds, features: parsed.features, sourceURL: endpoint.absoluteString,
-                             downloadedAt: job.createdAt, provider: "osm")
+        let regions = job.coverageRegions ?? [job.bounds]
+        let source = endpoint.absoluteString
+        var features: [MapFeature] = []
+        var seen = Set<Int64>()
+        var points = 0
+        var bytes: Int64 = 0
+        for (index, region) in regions.enumerated() {
+            try Task.checkCancellation()
+            let (request, _) = try MapDownloader.request(bounds: region, endpoint: endpoint)
+            let key = MapTileID(z: Self.regionKey.z, x: index, y: Self.regionKey.y)
+            let cached = try storage.cachedTile(job.id, key, source: source)
+            let data: Data
+            if let cached { data = cached }
+            else { data = try await fetch(request, Self.maximumResponseBytes) }
+            try Task.checkCancellation()
+            guard data.count <= Self.maximumResponseBytes else { throw MapError.invalid("区域数据超过 4 MB，请缩小范围。") }
+            let parsed = try OfflineMap.parse(data, bounds: region, sourceURL: source, allowsEmpty: regions.count > 1)
+            for feature in parsed.features where seen.insert(feature.id).inserted {
+                features.append(feature)
+                points += feature.points.count
+            }
+            guard features.count <= 20_000, points <= 200_000 else {
+                throw MapError.invalid("合并后的地图要素超过上限，请缩小缓冲范围或拆分线路。")
+            }
+            if cached == nil { try storage.saveTile(data, job: job.id, tile: key, source: source) }
+            bytes += Int64(data.count)
+            try await progress(index + 1, regions.count, bytes)
+        }
+        let map = OfflineMap(bounds: job.bounds, features: features, sourceURL: source,
+                             downloadedAt: job.createdAt, provider: "osm", coverageRegions: job.coverageRegions)
         let bundle = RouteMapBundle(route: job.route, map: map)
         _ = try MapBundleStorage.encode(bundle)
         try Task.checkCancellation()
-        if cached == nil { try storage.saveTile(data, job: job.id, tile: Self.regionKey) }
-        try await progress(1, 1, Int64(data.count))
         return bundle
     }
 }

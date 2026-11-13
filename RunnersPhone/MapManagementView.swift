@@ -59,7 +59,7 @@ struct MapManagementView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         NavigationLink(bundle.route.name) { PhoneMapViewer(route: bundle.route, map: bundle.map) }
                             .font(.headline)
-                        Text("\(bundle.map.provider == "thunderforest" ? "Thunderforest Outdoors" : "OSM") · \(bundle.map.bounds.areaSquareKilometers, specifier: "%.1f") km²")
+                        Text("\(bundle.map.provider == "thunderforest" ? "Thunderforest Outdoors" : "OSM") · \(bundle.map.coverageDescription)")
                             .font(.caption).foregroundStyle(.secondary)
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
                             Text(watch.status(for: packet)).font(.caption)

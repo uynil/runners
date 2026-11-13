@@ -7,8 +7,11 @@ struct MapBounds: Codable, Equatable {
     let north: Double
     let east: Double
 
-    static func around(_ route: PlannedRoute, bufferMeters: Double = 500) throws -> MapBounds {
-        let points = route.segments.flatMap { $0 }
+    static func around(_ route: PlannedRoute, bufferMeters: Double = 500, maximumArea: Double = 100) throws -> MapBounds {
+        try enclosing(route.segments.flatMap { $0 }, bufferMeters: bufferMeters, maximumArea: maximumArea)
+    }
+
+    private static func enclosing(_ points: [RoutePoint], bufferMeters: Double, maximumArea: Double) throws -> MapBounds {
         guard !points.isEmpty, points.allSatisfy({ $0.isValid }),
               let s = points.map(\.latitude).min(), let n = points.map(\.latitude).max(),
               let w = points.map(\.longitude).min(), let e = points.map(\.longitude).max(),
@@ -17,13 +20,88 @@ struct MapBounds: Codable, Equatable {
         }
         guard (100...5_000).contains(bufferMeters) else { throw MapError.invalid("地图缓冲范围无效。") }
         let latBuffer = bufferMeters / 111_000
-        let lonBuffer = latBuffer / max(0.17, cos((s + n) / 2 * .pi / 180))
+        let lonBuffer = latBuffer / max(0.17, cos(max(abs(s), abs(n)) * .pi / 180))
         let bounds = MapBounds(south: s - latBuffer, west: w - lonBuffer,
                                north: n + latBuffer, east: e + lonBuffer)
-        guard bounds.isValid, bounds.areaSquareKilometers <= 100 else {
+        guard bounds.isValid, bounds.areaSquareKilometers <= maximumArea else {
             throw MapError.invalid("地图范围超过 100 平方公里，请拆分线路后下载。")
         }
         return bounds
+    }
+
+    static func corridor(for route: PlannedRoute, bufferMeters: Double) throws -> [MapBounds] {
+        var regions: [MapBounds] = []
+        for segment in route.segments {
+            var points = Array(segment.prefix(1))
+            var length = 0.0
+            for (start, end) in zip(segment, segment.dropFirst()) {
+                let distance = start.distance(to: end)
+                guard distance.isFinite, distance <= 160_000 else {
+                    throw MapError.invalid("线路存在过长的连续路段，请检查原始线路。")
+                }
+                let count = max(1, Int(ceil(distance / 1_000)))
+                for step in 1...count {
+                    let fraction = Double(step) / Double(count)
+                    let point = RoutePoint(latitude: start.latitude + (end.latitude - start.latitude) * fraction,
+                                           longitude: start.longitude + (end.longitude - start.longitude) * fraction)
+                    length += distance / Double(count)
+                    points.append(point)
+                    if length >= 3_000 {
+                        try appendRegion(points, bufferMeters: bufferMeters, to: &regions)
+                        points = [point]
+                        length = 0
+                    }
+                }
+            }
+            if points.count > 1 { try appendRegion(points, bufferMeters: bufferMeters, to: &regions) }
+        }
+        return regions
+    }
+
+    private static func appendRegion(_ points: [RoutePoint], bufferMeters: Double, to regions: inout [MapBounds]) throws {
+        let bounds = try enclosing(points, bufferMeters: bufferMeters, maximumArea: 100)
+        if !regions.contains(bounds) { regions.append(bounds) }
+        guard regions.count <= 64 else {
+            throw MapError.invalid("线路覆盖超过 64 个区域，请拆分线路或缩小缓冲范围。")
+        }
+    }
+
+    func contains(_ bounds: MapBounds) -> Bool {
+        south <= bounds.south && west <= bounds.west && north >= bounds.north && east >= bounds.east
+    }
+    static func covers(_ segment: [RoutePoint], with regions: [MapBounds]) -> Bool {
+        for (start, end) in zip(segment, segment.dropFirst()) {
+            if regions.contains(where: { $0.contains(start) && $0.contains(end) }) { continue }
+            let lat = end.latitude - start.latitude
+            let lon = end.longitude - start.longitude
+            let intervals = regions.compactMap { region -> ClosedRange<Double>? in
+                var lower = 0.0, upper = 1.0
+                for (origin, delta, minimum, maximum) in [
+                    (start.latitude, lat, region.south, region.north),
+                    (start.longitude, lon, region.west, region.east)
+                ] {
+                    if delta == 0 {
+                        guard (minimum...maximum).contains(origin) else { return nil }
+                    } else {
+                        let a = (minimum - origin) / delta, b = (maximum - origin) / delta
+                        lower = max(lower, min(a, b)); upper = min(upper, max(a, b))
+                    }
+                }
+                return lower <= upper ? lower...upper : nil
+            }.sorted { $0.lowerBound < $1.lowerBound }
+            var covered = 0.0
+            for interval in intervals {
+                guard interval.lowerBound <= covered else { break }
+                covered = max(covered, interval.upperBound)
+                if covered >= 1 { break }
+            }
+            guard covered >= 1 else { return false }
+        }
+        return true
+    }
+    func union(_ other: MapBounds) -> MapBounds {
+        MapBounds(south: min(south, other.south), west: min(west, other.west),
+                  north: max(north, other.north), east: max(east, other.east))
     }
     var areaSquareKilometers: Double {
         (north - south) * 111 * (east - west) * 111 * cos((north + south) / 2 * .pi / 180)
@@ -68,9 +146,17 @@ struct OfflineMap: Codable {
     let downloadedAt: Date
     var provider: String? = nil
     var detailZoom: Int? = nil
+    var coverageRegions: [MapBounds]? = nil
+    var coverageDescription: String {
+        if let coverageRegions { return "\(coverageRegions.count) 个沿线区域" }
+        return String(format: "%.1f km²", bounds.areaSquareKilometers)
+    }
+    func covers(_ point: RoutePoint) -> Bool {
+        coverageRegions?.contains { $0.contains(point) } ?? bounds.contains(point)
+    }
     static let attribution = "© OpenStreetMap contributors · ODbL"
 
-    static func parse(_ data: Data, bounds: MapBounds, sourceURL: String) throws -> OfflineMap {
+    static func parse(_ data: Data, bounds: MapBounds, sourceURL: String, allowsEmpty: Bool = false) throws -> OfflineMap {
         struct Response: Decodable {
             struct Element: Decodable {
                 struct Coordinate: Decodable { let lat: Double; let lon: Double }
@@ -104,7 +190,7 @@ struct OfflineMap: Codable {
             return MapFeature(id: element.id, kind: kind, name: tags["name"], points: points,
                               nodeIDs: element.nodes?.count == points.count ? element.nodes : nil)
         }
-        guard !features.isEmpty else { throw MapError.invalid("该区域没有可用道路或水系数据，地图未保存。") }
+        guard allowsEmpty || !features.isEmpty else { throw MapError.invalid("该区域没有可用道路或水系数据，地图未保存。") }
         return OfflineMap(bounds: bounds, features: features, sourceURL: sourceURL, downloadedAt: Date())
     }
 }
@@ -116,13 +202,15 @@ struct RouteMapBundle: Codable, Identifiable {
     let map: OfflineMap
     init(route: PlannedRoute, map: OfflineMap) {
         self.route = route; self.map = map
-        schemaVersion = map.provider == "thunderforest" ? 2 : 1
+        schemaVersion = map.coverageRegions != nil ? 3 : (map.provider == "thunderforest" ? 2 : 1)
     }
     var isValid: Bool {
-        ((schemaVersion == 1 && map.provider != "thunderforest") || (schemaVersion == 2 && map.provider == "thunderforest"))
-            && map.bounds.isValid && map.bounds.areaSquareKilometers <= 101
+        validCoverage
             && !route.segments.isEmpty && route.pointCount <= 100_000
-            && route.segments.allSatisfy { $0.count >= 2 && $0.allSatisfy { $0.isValid && map.bounds.contains($0) } }
+            && route.segments.allSatisfy { segment in
+                segment.count >= 2 && segment.allSatisfy { $0.isValid && map.bounds.contains($0) }
+                    && (map.coverageRegions.map { MapBounds.covers(segment, with: $0) } ?? true)
+            }
             && !map.features.isEmpty && map.features.count <= 20_000
             && map.features.reduce(0, { $0 + $1.points.count + ($1.holes ?? []).reduce(0, { $0 + $1.count }) }) <= 200_000
             && map.features.allSatisfy {
@@ -136,9 +224,19 @@ struct RouteMapBundle: Codable, Identifiable {
             && (route.cues ?? []).allSatisfy {
                 !$0.id.isEmpty && $0.id.count <= 200
                     && $0.progressMeters.isFinite && (0...route.distanceMeters).contains($0.progressMeters)
-                    && $0.coordinate.isValid && map.bounds.contains($0.coordinate)
+                    && $0.coordinate.isValid && map.covers($0.coordinate)
                     && ["left", "right", "straight"].contains($0.turn) && $0.name.count <= 100
             }
+    }
+
+    private var validCoverage: Bool {
+        guard map.bounds.isValid else { return false }
+        if let regions = map.coverageRegions {
+            return schemaVersion == 3 && map.provider == "osm" && (1...64).contains(regions.count)
+                && regions.allSatisfy { $0.isValid && $0.areaSquareKilometers <= 100 && map.bounds.contains($0) }
+        }
+        return map.bounds.areaSquareKilometers <= 101
+            && ((schemaVersion == 1 && map.provider != "thunderforest") || (schemaVersion == 2 && map.provider == "thunderforest"))
     }
 }
 
@@ -189,6 +287,10 @@ struct MapBundleStorage {
             throw MapError.invalid("最多保存 20 个地图包，请先清理其他线路地图。")
         }
         guard used + data.count <= Self.quotaBytes else { throw MapError.invalid("离线地图已达到 150 MB 上限，请清理其他地图。") }
+        if let attributes = try? FileManager.default.attributesOfFileSystem(forPath: directory.path),
+           let free = attributes[.systemFreeSize] as? NSNumber, free.int64Value < Int64(data.count) {
+            throw MapError.invalid("设备可用空间不足，原有地图已保留。")
+        }
         try data.write(to: fileURL(bundle.id), options: .atomic)
         return bundle
     }

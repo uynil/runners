@@ -74,7 +74,7 @@ struct RouteShapeView: View {
                 for feature in map.features {
                     guard names.count < 16, let name = feature.name, !name.isEmpty, !names.contains(name),
                           let point = feature.points.dropFirst(feature.points.count / 2).first,
-                          map.bounds.contains(point) else { continue }
+                          map.covers(point) else { continue }
                     let location = screen(project(point))
                     guard labelPositions.allSatisfy({ abs($0.x - location.x) > 70 || abs($0.y - location.y) > 20 }) else { continue }
                     context.draw(Text(String(name.prefix(16))).font(.system(size: 9)).foregroundColor(.secondary),
@@ -94,7 +94,7 @@ struct RouteShapeView: View {
                 let p = screen(start)
                 context.fill(Path(ellipseIn: CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10)), with: .color(.blue))
             }
-            if let currentPosition, map?.bounds.contains(currentPosition) ?? true {
+            if let currentPosition, map?.covers(currentPosition) ?? true {
                 let p = screen(project(currentPosition))
                 context.fill(Path(ellipseIn: CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10)), with: .color(.red))
             }

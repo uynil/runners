@@ -55,7 +55,7 @@ private struct WatchMapDetail: View {
                     }.disabled(recorder.phase != .idle && recorder.phase != .finished)
                     if let navigationMessage { Text(navigationMessage).font(.caption2) }
                     NavigationLink("打开跑步导航") { RouteNavigationView() }.font(.caption)
-                    if let position, !bundle.map.bounds.contains(position) {
+                    if let position, !bundle.map.covers(position) {
                         Text("当前位置在地图覆盖范围外").font(.caption2).foregroundStyle(.yellow)
                     } else if position == nil { Text("暂无新鲜定位；开始运动后可显示当前位置").font(.caption2) }
                     Text("\((bundle.route.cues ?? []).filter(\.confirmed).count) 个已核验路口；直线回线方位不代表可通行道路。")

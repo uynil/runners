@@ -8,38 +8,60 @@ struct MapSelectionView: View {
     @State private var confirming = false
     @State private var customBounds: MapBounds?
 
-    private var bounds: MapBounds? { customBounds ?? (try? MapBounds.around(route, bufferMeters: Double(buffer))) }
+    private var baseBounds: MapBounds? { try? MapBounds.around(route, bufferMeters: Double(buffer), maximumArea: .infinity) }
+    private var usesCorridor: Bool { (baseBounds?.areaSquareKilometers ?? 0) > 100 }
+    private var corridor: [MapBounds]? {
+        guard usesCorridor else { return nil }
+        return try? MapBounds.corridor(for: route, bufferMeters: Double(buffer))
+    }
+    private var bounds: MapBounds? {
+        if usesCorridor, let corridor, let first = corridor.first {
+            return corridor.dropFirst().reduce(first) { $0.union($1) }
+        }
+        return customBounds ?? baseBounds
+    }
     private var viewport: MapBounds? {
-        guard let base = try? MapBounds.around(route, bufferMeters: Double(buffer)) else { return nil }
+        guard let base = bounds else { return nil }
+        if !usesCorridor, let baseBounds { return paddedViewport(baseBounds) }
+        return paddedViewport(base)
+    }
+    private func paddedViewport(_ base: MapBounds) -> MapBounds {
         let dy = (base.north - base.south) * 0.25, dx = (base.east - base.west) * 0.25
         return MapBounds(south: base.south - dy, west: base.west - dx, north: base.north + dy, east: base.east + dx)
     }
-    private var selectionValid: Bool { bounds.map { $0.isValid && $0.areaSquareKilometers <= 100 } ?? false }
+    private var selectionValid: Bool {
+        if usesCorridor { return corridor?.isEmpty == false }
+        return bounds.map { $0.isValid && $0.areaSquareKilometers <= 100 } ?? false
+    }
     var body: some View {
         NavigationStack {
             List {
                 Section {
                     RouteShapeView(route: route, map: maps.bundles[route.id]?.map,
-                        viewportBounds: viewport, selectionBounds: bounds)
+                        viewportBounds: viewport, selectionBounds: usesCorridor ? nil : bounds)
                         .overlay {
-                            if let viewport, let bounds, let minimum = try? MapBounds.around(route, bufferMeters: 100),
+                            if !usesCorridor, let viewport, let bounds, let minimum = try? MapBounds.around(route, bufferMeters: 100),
                                let latitude = route.segments.first?.first?.latitude {
                                 MapBoundsHandles(bounds: Binding(get: { self.bounds ?? bounds }, set: { customBounds = $0 }),
                                                  viewport: viewport, minimum: minimum, latitude: latitude)
                             }
                         }.frame(height: 240)
-                    Text("拖动蓝框四角调整范围，选区始终保留整条线路。尚未下载的区域只预览线路形状。")
+                    Text(usesCorridor ? "按线路分段下载沿线范围。分段下载完成后合并保存。" : "拖动蓝框四角调整范围，选区始终保留整条线路。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("范围与细节") {
                     Picker("线路周边", selection: $buffer) {
                         Text("500 米").tag(500); Text("1 公里").tag(1000); Text("2 公里").tag(2000)
                     }.pickerStyle(.segmented)
-                    if let bounds, selectionValid {
+                    if let corridor, usesCorridor {
+                        LabeledContent("沿线下载", value: "\(corridor.count) 个区域")
+                        Text("每个区域上限 4 MB，合并包上限 24 MB。已验证的区域可在重试时复用。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else if let bounds, selectionValid {
                         LabeledContent("覆盖面积", value: String(format: "%.1f km²", bounds.areaSquareKilometers))
                         Text("下载所选区域完整路网；大小需下载后确认，单次响应上限 4 MB。")
                             .font(.caption).foregroundStyle(.secondary)
-                    } else { Text("范围超过 100 平方公里，请缩小范围。") .foregroundStyle(.red) }
+                    } else { Text("无法生成下载范围，请缩小缓冲或拆分线路。").foregroundStyle(.red) }
                 }
                 Section("地图来源") {
                     Text("OpenStreetMap · 原始矢量路网")
@@ -53,10 +75,13 @@ struct MapSelectionView: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
             .confirmationDialog("下载这个区域的地图？", isPresented: $confirming, titleVisibility: .visible) {
                 Button("确认下载") {
-                    if let bounds { maps.enqueue(route: route, bounds: bounds, zoom: 13); dismiss() }
+                    if let bounds, selectionValid {
+                        maps.enqueue(route: route, bounds: bounds, zoom: 13, coverageRegions: corridor)
+                        dismiss()
+                    }
                 }
             } message: {
-                Text("将所选区域边界发送至 OSM 数据服务（\(OfflineMapStore.endpointString)）获取路网，完整 GPX 不上传。中断后可重新下载。")
+                Text("将下载区域边界发送至 OSM 数据服务（\(OfflineMapStore.endpointString)）获取路网。")
             }
         }
     }

@@ -161,16 +161,53 @@ final class VectorMapTests: XCTestCase {
             RoutePoint(latitude: 30, longitude: 120), RoutePoint(latitude: 30.001, longitude: 120.001)
         ]])
         let job = try MapDownloadJob(route: route, bounds: MapBounds.around(route), zoom: 13)
+        let endpoint = URL(string: "https://example.invalid/api")!
         let downloader = OSMRegionDownloader(fetch: { _, _ in
             Data("{\"elements\":[],\"remark\":\"runtime timeout\"}".utf8)
         })
         do {
-            _ = try await downloader.download(job: job, endpoint: URL(string: "https://example.invalid/api")!, storage: storage) { _, _, _ in
+            _ = try await downloader.download(job: job, endpoint: endpoint, storage: storage) { _, _, _ in
                 XCTFail("Incomplete response must not advance progress")
             }
             XCTFail("Incomplete response accepted")
         } catch { }
-        XCTAssertNil(try storage.cachedTile(job.id, OSMRegionDownloader.regionKey))
+        XCTAssertNil(try storage.cachedTile(job.id, OSMRegionDownloader.regionKey, source: endpoint.absoluteString))
+    }
+
+    func testLongCorridorResumesAndRejectsGapsBetweenRegions() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = MapJobStorage(directory: directory)
+        let segment = [RoutePoint(latitude: 30, longitude: 120), RoutePoint(latitude: 30.18, longitude: 120.18)]
+        let route = PlannedRoute(name: "Long route", sourceName: "fixture", segments: [segment])
+        XCTAssertThrowsError(try MapBounds.around(route))
+        let regions = try MapBounds.corridor(for: route, bufferMeters: 500)
+        let first = try XCTUnwrap(regions.first)
+        let last = try XCTUnwrap(regions.last)
+        let bounds = regions.dropFirst().reduce(first) { $0.union($1) }
+        XCTAssertTrue(MapBounds.covers(segment, with: regions))
+        XCTAssertFalse(MapBounds.covers(segment, with: [first, last]))
+        let job = try MapDownloadJob(route: route, bounds: bounds, zoom: 13, coverageRegions: regions)
+        let endpoint = URL(string: "https://example.invalid/osm")!
+        var fetched = 0
+        let downloader = OSMRegionDownloader(fetch: { _, _ in
+            fetched += 1
+            return Data("""
+            {"elements":[{"type":"way","id":1,"tags":{"highway":"path"},"geometry":[{"lat":30,"lon":120},{"lat":30.001,"lon":120.001}]}]}
+            """.utf8)
+        })
+        do {
+            _ = try await downloader.download(job: job, endpoint: endpoint, storage: storage) { _, _, _ in
+                throw CancellationError()
+            }
+            XCTFail("Expected pause")
+        } catch is CancellationError {}
+        let bundle = try await downloader.download(job: job, endpoint: endpoint, storage: storage) { _, _, _ in }
+        let decoded = try MapBundleStorage.decode(MapBundleStorage.encode(bundle))
+        XCTAssertEqual(fetched, regions.count)
+        XCTAssertEqual(decoded.schemaVersion, 3)
+        XCTAssertEqual(decoded.map.features.count, 1)
+        XCTAssertFalse(decoded.map.covers(RoutePoint(latitude: 30.001, longitude: 120.175)))
     }
 
     func testRemovalQueueSurvivesRestartWithoutLosingCommandIdentity() throws {

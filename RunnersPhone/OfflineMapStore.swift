@@ -43,17 +43,17 @@ final class OfflineMapStore: ObservableObject {
         } catch { jobsAvailable = false; storageError = "下载任务读取失败，原文件已保留。" }
     }
 
-    func enqueue(route: PlannedRoute, bounds: MapBounds, zoom: Int) {
+    func enqueue(route: PlannedRoute, bounds: MapBounds, zoom: Int, coverageRegions: [MapBounds]? = nil) {
         guard jobsAvailable else { storageError = "下载任务文件不可读取，请先恢复原文件。"; return }
         do {
             if let existing = jobs.first(where: { $0.route.id == route.id && $0.phase != .completed }) {
-                guard existing.bounds == bounds, existing.zoom == zoom else {
+                guard existing.bounds == bounds, existing.zoom == zoom, existing.coverageRegions == coverageRegions else {
                     throw MapError.invalid("这条线路已有未完成下载，请先在地图管理中移除原任务，再更改区域。")
                 }
                 resume(existing.id); return
             }
             guard jobs.count < 20 else { throw MapError.invalid("最多保留 20 个下载任务，请先移除旧任务。") }
-            let job = try MapDownloadJob(route: route, bounds: bounds, zoom: zoom)
+            let job = try MapDownloadJob(route: route, bounds: bounds, zoom: zoom, coverageRegions: coverageRegions)
             try jobStorage.save(jobs + [job])
             jobs.append(job)
             resume(job.id)
@@ -64,7 +64,6 @@ final class OfflineMapStore: ObservableObject {
         guard let index = jobs.firstIndex(where: { $0.id == id }), jobs[index].phase != .completed,
               activeJob != id, jobsAvailable else { return }
         jobs[index].phase = .queued; jobs[index].error = nil
-        jobs[index].totalTiles = 1; jobs[index].completedTiles = 0; jobs[index].receivedBytes = 0
         guard persistJobs() else { return }
         startNext()
     }
@@ -120,11 +119,6 @@ final class OfflineMapStore: ObservableObject {
         let next = jobs.filter { $0.id != id }
         do { try jobStorage.save(next); jobs = next; try jobStorage.removeTiles(id) }
         catch { storageError = "无法移除下载任务。" }
-    }
-
-    func download(_ route: PlannedRoute) {
-        do { enqueue(route: route, bounds: try MapBounds.around(route), zoom: 13) }
-        catch { errors[route.id] = error.localizedDescription }
     }
 
     func cancel(_ id: UUID) {

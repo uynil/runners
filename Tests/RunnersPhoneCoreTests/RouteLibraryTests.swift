@@ -2,6 +2,28 @@ import XCTest
 @testable import RunnersPhoneCore
 
 final class RouteLibraryTests: XCTestCase {
+    func testReverseDirectionPreservesGapsAndReversesConfirmedTurns() throws {
+        var route = try XCTUnwrap(parse("""
+        <gpx><trk><trkseg><trkpt lat="30" lon="120"/><trkpt lat="30.001" lon="120"/></trkseg>
+        <trkseg><trkpt lat="31" lon="120"/><trkpt lat="31.001" lon="120"/></trkseg></trk></gpx>
+        """).first)
+        let original = route
+        route.cues = [RouteCue(id: "turn", progressMeters: 50, coordinate: route.segments[0][0],
+                              turn: "left", name: "junction", confirmed: true)]
+        route.reverseDirection()
+        XCTAssertEqual(route.id, original.id)
+        XCTAssertEqual(route.segments, original.segments.reversed().map { Array($0.reversed()) })
+        XCTAssertEqual(route.distanceMeters, original.distanceMeters, accuracy: 0.001)
+        let cue = try XCTUnwrap(route.cues?.first)
+        XCTAssertEqual(cue.progressMeters, original.distanceMeters - 50, accuracy: 0.001)
+        XCTAssertEqual(cue.turn, "right")
+        XCTAssertTrue(cue.confirmed)
+        XCTAssertNotNil(route.cuesUpdatedAt)
+        route.reverseDirection()
+        XCTAssertEqual(route.segments, original.segments)
+        XCTAssertEqual(route.isReversed, false)
+    }
+
     private func parse(_ xml: String) throws -> [PlannedRoute] {
         try RouteImporter.read(Data(xml.utf8), sourceName: "example.gpx")
     }

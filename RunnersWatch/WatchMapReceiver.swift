@@ -140,7 +140,7 @@ final class WatchMapReceiver: NSObject, ObservableObject, WCSessionDelegate {
             let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             let attributes = try? FileManager.default.attributesOfFileSystem(forPath: directory.path)
             let available = (attributes?[.systemFreeSize] as? NSNumber)?.int64Value
-            let report = MapStorageReport(mapBytes: used, availableBytes: available, reportedAt: Date(), supportedMapSchema: 2)
+            let report = MapStorageReport(mapBytes: used, availableBytes: available, reportedAt: Date(), supportedMapSchema: 3)
             let removals = try MapRemovalQueue.load(from: Self.removalURL).results
             var context: [String: Any] = ["mapReceipts": try JSONEncoder().encode(receipts),
                                           "mapStorage": try JSONEncoder().encode(report),

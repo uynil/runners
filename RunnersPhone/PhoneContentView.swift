@@ -214,7 +214,7 @@ private struct RouteDetailView: View {
                     if let bundle = maps.bundles[id] {
                         Label("地图已保存到手机，断网可用", systemImage: "checkmark.circle.fill")
                         LabeledContent("下载时间") { Text(bundle.map.downloadedAt, style: .date) }
-                        LabeledContent("地图范围", value: String(format: "%.1f km²", bundle.map.bounds.areaSquareKilometers))
+                        LabeledContent("地图范围", value: bundle.map.coverageDescription)
                         LabeledContent("地图要素", value: "\(bundle.map.features.count)")
                         let packet = RouteMapBundle(route: route, map: bundle.map)
                         Text(watch.status(for: packet)).font(.caption)

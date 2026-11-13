@@ -18,6 +18,7 @@ struct MapDownloadJob: Codable, Identifiable {
     let route: PlannedRoute
     let bounds: MapBounds
     let zoom: Int
+    var coverageRegions: [MapBounds]? = nil
     var phase: DownloadPhase = .queued
     var completedTiles = 0
     var totalTiles = 0
@@ -25,14 +26,20 @@ struct MapDownloadJob: Codable, Identifiable {
     var error: String?
     let createdAt: Date
 
-    init(route: PlannedRoute, bounds: MapBounds, zoom: Int, createdAt: Date = Date()) throws {
+    init(route: PlannedRoute, bounds: MapBounds, zoom: Int, coverageRegions: [MapBounds]? = nil, createdAt: Date = Date()) throws {
         guard bounds.isValid, !route.segments.isEmpty, route.pointCount <= 100_000,
               route.segments.allSatisfy({ $0.count >= 2 && $0.allSatisfy { $0.isValid && bounds.contains($0) } }) else {
             throw MapError.invalid("选区需要覆盖整条线路。")
         }
         self.route = route; self.bounds = bounds; self.zoom = zoom; self.createdAt = createdAt
-        guard bounds.areaSquareKilometers <= 100 else { throw MapError.invalid("地图范围超过 100 平方公里。") }
-        totalTiles = 1 // OSM region response is one atomic download, independent of display zoom.
+        let regions = coverageRegions ?? [bounds]
+        guard (1...64).contains(regions.count),
+              regions.allSatisfy({ $0.isValid && $0.areaSquareKilometers <= 100 && bounds.contains($0) }),
+              coverageRegions == nil || route.segments.allSatisfy({ MapBounds.covers($0, with: regions) }) else {
+            throw MapError.invalid("地图下载区域无效。")
+        }
+        self.coverageRegions = coverageRegions
+        totalTiles = regions.count
     }
 }
 
@@ -47,11 +54,12 @@ struct MapJobStorage {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(jobs).write(to: catalog, options: .atomic)
     }
-    func tileURL(_ job: UUID, _ tile: MapTileID) -> URL {
-        directory.appendingPathComponent(job.uuidString).appendingPathComponent(tile.key + ".json")
+    func tileURL(_ job: UUID, _ tile: MapTileID, source: String = "") -> URL {
+        let prefix = source.isEmpty ? "" : MapBundleStorage.digest(Data(source.utf8)) + "-"
+        return directory.appendingPathComponent(job.uuidString).appendingPathComponent(prefix + tile.key + ".json")
     }
-    func cachedTile(_ job: UUID, _ tile: MapTileID) throws -> Data? {
-        let url = tileURL(job, tile)
+    func cachedTile(_ job: UUID, _ tile: MapTileID, source: String = "") throws -> Data? {
+        let url = tileURL(job, tile, source: source)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 6 * 1_024 * 1_024 else { return nil }
         guard let envelope = try? JSONDecoder().decode(MapBundleStorage.Envelope.self, from: Data(contentsOf: url)),
@@ -59,11 +67,11 @@ struct MapJobStorage {
               MapBundleStorage.digest(envelope.payload) == envelope.sha256 else { return nil }
         return envelope.payload
     }
-    func saveTile(_ data: Data, job: UUID, tile: MapTileID) throws {
+    func saveTile(_ data: Data, job: UUID, tile: MapTileID, source: String = "") throws {
         guard data.count <= 4 * 1_024 * 1_024 else { throw MapError.invalid("地图分块过大。") }
         let envelope = MapBundleStorage.Envelope(sha256: MapBundleStorage.digest(data), payload: data)
         let encoded = try JSONEncoder().encode(envelope)
-        let url = tileURL(job, tile)
+        let url = tileURL(job, tile, source: source)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let used = try stagingBytes()
         let previous = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
