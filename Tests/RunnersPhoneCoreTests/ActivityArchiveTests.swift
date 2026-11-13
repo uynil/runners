@@ -22,6 +22,21 @@ final class ActivityArchiveTests: XCTestCase {
         XCTAssertTrue(try decoded.samples().compactMap(\.heartRate).isEmpty)
         XCTAssertThrowsError(try ActivityStorage.encode(archive(ended: false)))
     }
+    func testRecoveryGapBreaksEvenAQuickRestartInHistoryAndExport() throws {
+        let base = archive()
+        let samples = String(decoding: base.samplesData, as: UTF8.self)
+            .replacingOccurrences(of: "\"pause\"", with: "\"recoveryGap\"")
+            .replacingOccurrences(of: "1700000030", with: "1700000011")
+            .replacingOccurrences(of: "1700000035", with: "1700000016")
+            .replacingOccurrences(of: "30.001", with: "30.0001")
+            .replacingOccurrences(of: "30.002", with: "30.0002")
+            .replacingOccurrences(of: "30.003", with: "30.0003")
+        let recovered = ActivityArchive(summaryData: base.summaryData, samplesData: Data(samples.utf8))
+        XCTAssertEqual(try recovered.track().map(\.count), [2,2])
+        let tcx = String(decoding: try ActivityTCX.data(recovered), as: UTF8.self)
+        XCTAssertEqual(tcx.components(separatedBy: "<Track>").count - 1, 2)
+        XCTAssertEqual(tcx.components(separatedBy: "<Position>").count - 1, 4)
+    }
     func testDuplicateReceiptAndCorruptReplacementPreserveHistory() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }

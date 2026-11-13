@@ -25,7 +25,8 @@ final class RunStorage {
         let folder = baseURL.appendingPathComponent(summary.id.uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let samples = folder.appendingPathComponent("samples.ndjson")
-        guard FileManager.default.createFile(atPath: samples.path, contents: nil) else {
+        guard !FileManager.default.fileExists(atPath: samples.path),
+              FileManager.default.createFile(atPath: samples.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
         handle = try FileHandle(forWritingTo: samples)
@@ -55,6 +56,61 @@ final class RunStorage {
         try handle.write(contentsOf: pending)
         pending.removeAll(keepingCapacity: true)
         bufferedSamples = 0
+    }
+
+    /// Reopen, never recreate, the original sample file. Replay persisted counters
+    /// because a batch may have reached disk after the last atomic summary.
+    func reopen(_ summary: RunSummary, asOf now: Date) throws -> (summary: RunSummary, lastSampleAt: Date) {
+        let folder = baseURL.appendingPathComponent(summary.id.uuidString, isDirectory: true)
+        let samplesURL = folder.appendingPathComponent("samples.ndjson")
+        let size = try samplesURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
+        guard size <= 16 * 1_024 * 1_024 else { throw CocoaError(.fileReadTooLarge) }
+        let data = try Data(contentsOf: samplesURL)
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .secondsSince1970
+        var restored = summary, lastDate = summary.startedAt
+        var gpsCount = 0, heart = WorkoutMetrics()
+        var completeLength = data.count, discardedTail: Data?
+        let lines = data.split(separator: 0x0A)
+        for (index, line) in lines.enumerated() {
+            let sample: RunSample
+            do { sample = try decoder.decode(RunSample.self, from: Data(line)) }
+            catch {
+                // A crash during append may leave only the final record incomplete.
+                guard index == lines.count - 1, data.last != 0x0A else { throw error }
+                discardedTail = Data(line)
+                completeLength = data.count - line.count
+                break
+            }
+            if sample.timestamp <= now, sample.kind != "gps" || sample.acceptedForDistance == true {
+                lastDate = max(lastDate, sample.timestamp)
+            }
+            if sample.kind == "gps" {
+                gpsCount += 1
+                if let distance = sample.cumulativeDistanceMeters, distance.isFinite {
+                    restored.distanceMeters = max(restored.distanceMeters, distance)
+                }
+            } else if sample.kind == "heartRate", let rate = sample.heartRate { heart.recordHeartRate(rate) }
+        }
+        restored.gpsSampleCount = max(summary.gpsSampleCount, gpsCount)
+        if heart.heartRateCount > summary.heartSampleCount {
+            restored.heartSampleCount = heart.heartRateCount
+            if restored.metrics == nil { restored.metrics = WorkoutMetrics() }
+            restored.metrics?.heartRateCount = heart.heartRateCount
+            restored.metrics?.heartRateSum = heart.heartRateSum
+            restored.metrics?.maximumHeartRate = heart.maximumHeartRate
+        }
+        try handle?.close()
+        let reopened = try FileHandle(forWritingTo: samplesURL)
+        if let discardedTail {
+            let backup = folder.appendingPathComponent("interrupted-sample-\(UUID().uuidString).partial")
+            try discardedTail.write(to: backup, options: .atomic)
+            try reopened.truncate(atOffset: UInt64(completeLength))
+        }
+        try reopened.seekToEnd()
+        if completeLength > 0, data[completeLength - 1] != 0x0A { try reopened.write(contentsOf: Data([0x0A])) }
+        handle = reopened; runURL = folder
+        pending = Data(); bufferedSamples = 0
+        return (restored, lastDate)
     }
 
     func latestSummary() -> RunSummary? {

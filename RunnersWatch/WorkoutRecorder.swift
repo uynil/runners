@@ -6,7 +6,7 @@ import WatchKit
 
 @MainActor
 final class WorkoutRecorder: NSObject, ObservableObject {
-    enum Phase { case idle, authorizing, starting, running, paused, saving, finished }
+    enum Phase { case idle, authorizing, starting, recovering, running, paused, saving, finished }
 
     @Published private(set) var phase: Phase = .idle
     @Published var selectedActivity: OutdoorActivity = .running
@@ -73,6 +73,7 @@ final class WorkoutRecorder: NSObject, ObservableObject {
     private var activeSegmentStart: Date?
     private var checkpointTimer: Timer?
     private var finishingHealth = false
+    private var recoveryInFlight = false
     private var navigator: RouteNavigator?
 
     override init() {
@@ -84,10 +85,7 @@ final class WorkoutRecorder: NSObject, ObservableObject {
         summary = storage.latestSummary()
         reloadNavigationRoute()
         if let summary {
-            phase = .finished
-            if summary.endedAt == nil {
-                message = "上次采集中断，本地检查点已保留。"
-            }
+            phase = summary.endedAt == nil || summary.healthStatus == "正在保存至健康" ? .recovering : .finished
         }
     }
 
@@ -95,8 +93,89 @@ final class WorkoutRecorder: NSObject, ObservableObject {
         (phase == .idle || phase == .finished) && storageError == nil
     }
 
+    func recoverIfNeeded() {
+        guard phase == .recovering, !recoveryInFlight, let saved = summary else { return }
+        recoveryInFlight = true
+        Task {
+            defer { recoveryInFlight = false }
+            let recovered: HKWorkoutSession?
+            do { recovered = try await healthStore.recoverActiveWorkoutSession() }
+            catch let error as HKError where error.code == .errorDatabaseInaccessible {
+                message = "解锁手表后重试接续运动。原记录已保留。"
+                return
+            } catch { recovered = nil }
+            let now = Date()
+            do {
+                let reopened = try storage.reopen(saved, asOf: now)
+                summary = reopened.summary
+                guard let recovered else {
+                    preserveInterrupted(at: reopened.lastSampleAt)
+                    return
+                }
+                let recoveredBuilder = recovered.associatedWorkoutBuilder()
+                let start = recoveredBuilder.startDate ?? recovered.startDate
+                guard let start, abs(start.timeIntervalSince(saved.startedAt)) <= 1,
+                      [.running, .paused, .stopped].contains(recovered.state) else {
+                    preserveInterrupted(at: reopened.lastSampleAt)
+                    return
+                }
+                session = recovered; builder = recoveredBuilder
+                recoveredBuilder.dataSource = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: recovered.workoutConfiguration)
+                recoveredBuilder.dataSource?.disableCollection(for: HKQuantityType(.distanceWalkingRunning))
+                recovered.delegate = self; recoveredBuilder.delegate = self
+                healthWriter = HealthWorkoutWriter(builder: recoveredBuilder, store: healthStore)
+                selectedActivity = saved.activity ?? .running
+                distance = DistanceAccumulator(meters: summary?.distanceMeters ?? 0)
+                elevation = ElevationAccumulator(ascent: saved.metrics?.ascentMeters ?? 0, descent: saved.metrics?.descentMeters ?? 0)
+                lapStartMeters = saved.laps?.reduce(0) { $0 + $1.distanceMeters } ?? 0
+                lapStartSeconds = saved.laps?.reduce(0) { $0 + $1.activeSeconds } ?? 0
+                navigationSettings = NavigationSettings.load() ?? NavigationSettings()
+                lastHealthDistanceDate = now
+                let state = recovered.state
+                if saved.endedAt != nil || state == .stopped {
+                    let end = saved.endedAt ?? recovered.endDate ?? now
+                    summary?.endedAt = end
+                    phase = .saving
+                    if state == .stopped { finishHealth(at: end) }
+                    else { recovered.stopActivity(with: end) }
+                    return
+                }
+                summary?.recoveryCount = (saved.recoveryCount ?? 0) + 1
+                summary?.metrics?.altitudeMeters = nil
+                append(RunSample(kind: "recoveryGap", timestamp: now, receivedAt: now, fix: nil,
+                    heartRate: nil, acceptedForDistance: nil,
+                    gapStartedAt: min(now, max(reopened.lastSampleAt, saved.lastCheckpointAt ?? saved.startedAt))))
+                if state == .running { recordEvent("resume", at: now) }
+                // Do not reconstruct unobserved time, GPS distance, or heart samples.
+                observationStart = now
+                activeSegmentStart = state == .running ? now : nil
+                phase = state == .running ? .running : .paused
+                message = "已接回运动，记录中断处保留缺口。"
+                checkpoint()
+                scheduleCheckpoints()
+                startLocationIfAuthorized()
+            } catch {
+                // Keep the original files and never start a replacement workout silently.
+                storageError = "无法接续原采样文件：\(error.localizedDescription)"
+                message = "已保留原始运动记录。"
+                phase = .finished
+            }
+        }
+    }
+
+    private func preserveInterrupted(at lastSample: Date) {
+        guard let saved = summary else { return }
+        let end = saved.endedAt ?? max(saved.lastCheckpointAt ?? saved.startedAt, lastSample)
+        summary?.endedAt = end
+        summary?.healthStatus = "运动中断；健康保存未确认"
+        recordEvent("interrupted", at: end)
+        message = "系统没有可接续的运动；已保留中断前记录。"
+        checkpoint()
+        phase = .finished
+    }
+
     func reloadNavigationRoute() {
-        guard phase == .idle || phase == .finished else { return }
+        guard phase == .idle || phase == .finished || phase == .recovering else { return }
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("navigation-route.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return }
@@ -220,13 +299,17 @@ final class WorkoutRecorder: NSObject, ObservableObject {
                     self.interrupt(error?.localizedDescription ?? "运动采集启动失败。")
                 }
             }
-            checkpointTimer?.invalidate()
-            checkpointTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.checkpoint() }
-            }
+            scheduleCheckpoints()
         } catch {
             phase = .idle
             message = "无法开始：\(error.localizedDescription)"
+        }
+    }
+
+    private func scheduleCheckpoints() {
+        checkpointTimer?.invalidate()
+        checkpointTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.checkpoint() }
         }
     }
 
@@ -257,6 +340,7 @@ final class WorkoutRecorder: NSObject, ObservableObject {
         settleTime(at: Date())
         healthWriter?.flush()
         do {
+            summary?.lastCheckpointAt = Date()
             try storage.checkpoint(summary!)
             storageError = nil
         } catch {
@@ -285,7 +369,7 @@ final class WorkoutRecorder: NSObject, ObservableObject {
                 if let id = summary?.id {
                     try await builder.addMetadata([HKMetadataKeySyncIdentifier: "runners-\(id.uuidString)", HKMetadataKeySyncVersion: 1])
                 }
-                try await builder.endCollection(at: date)
+                if builder.endDate == nil { try await builder.endCollection(at: date) }
                 let workout = try await builder.finishWorkout()
                 finishResult(workout: workout, error: nil)
             } catch { finishResult(workout: nil, error: error) }
@@ -296,8 +380,10 @@ final class WorkoutRecorder: NSObject, ObservableObject {
         if let builder { receiveEnergy(from: builder) }
         summary?.healthWorkoutID = workout?.uuid
         summary?.healthStatus = workout == nil ? "健康保存未成功" : "运动已保存至健康"
-        summary?.healthRouteStatus = workout == nil ? "运动未保存，健康轨迹未确认" : healthWriter?.routeStatus
-        summary?.healthDistanceStatus = healthWriter?.distanceStatus
+        let recovered = (summary?.recoveryCount ?? 0) > 0
+        summary?.healthRouteStatus = workout == nil ? "运动未保存，健康轨迹未确认"
+            : recovered ? "中断前最后一批 GPS 可能未写入；完整本地采样保留" : healthWriter?.routeStatus
+        summary?.healthDistanceStatus = recovered ? "中断前后健康距离可能与本地不同" : healthWriter?.distanceStatus
         if let error { message = error.localizedDescription }
         session?.end()
         phase = .finished

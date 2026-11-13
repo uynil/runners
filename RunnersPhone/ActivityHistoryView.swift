@@ -45,6 +45,10 @@ private struct ActivityDetailView: View {
                 Text("实际记录示意 · 无底图").font(.caption).foregroundStyle(.secondary)
             }
             Section("活动摘要") {
+                if let count = entry.summary.recoveryCount, count > 0 {
+                    Label("记录中断后接续 \(count) 次；缺测区间未补写。", systemImage: "arrow.clockwise")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 LabeledContent("开始", value: entry.summary.startedAt.formatted())
                 LabeledContent("距离", value: String(format: "%.2f km", entry.summary.distanceMeters / 1000))
                 LabeledContent("活动时间", value: duration(entry.summary.activeSeconds))

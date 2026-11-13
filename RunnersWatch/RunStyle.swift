@@ -42,6 +42,7 @@ enum RunStyle {
     static func phase(_ phase: WorkoutRecorder.Phase) -> String {
         switch phase {
         case .idle: "准备"; case .authorizing: "授权中"; case .starting: "准备中"
+        case .recovering: "正在检查运动恢复"
         case .running: "记录中"; case .paused: "已暂停"; case .saving: "保存中"; case .finished: "已结束"
         }
     }

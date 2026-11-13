@@ -4,6 +4,42 @@ import XCTest
 final class RunDataTests: XCTestCase {
     private let start = Date(timeIntervalSince1970: 1_700_000_000)
 
+    func testReopeningRetainsSamplesRestoresDistanceAndPreservesIncompleteTail() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let summary = RunSummary(id: UUID(), startedAt: start, endedAt: nil, activeSeconds: 0, distanceMeters: 0,
+                                 gpsSampleCount: 0, heartSampleCount: 0, healthStatus: "recording", healthWorkoutID: nil)
+        let run = folder.appendingPathComponent(summary.id.uuidString), file = run.appendingPathComponent("samples.ndjson")
+        let sample = RunSample(kind: "gps", timestamp: start.addingTimeInterval(2), receivedAt: start, fix: fix(seconds: 2),
+                               heartRate: nil, acceptedForDistance: true, cumulativeDistanceMeters: 14)
+        do {
+            let store = RunStorage(baseURL: folder)
+            try store.begin(summary)
+            try store.append(sample)
+            try store.flush()
+        }
+        let original = try Data(contentsOf: file), tail = Data("{\"kind\":\"gp".utf8)
+        try (original + tail).write(to: file)
+        let resumed = RunStorage(baseURL: folder)
+        let restored = try resumed.reopen(summary, asOf: start.addingTimeInterval(40))
+        XCTAssertEqual(restored.summary.id, summary.id)
+        XCTAssertEqual(restored.summary.gpsSampleCount, 1)
+        XCTAssertEqual(restored.summary.distanceMeters, 14)
+        XCTAssertEqual(restored.summary.activeSeconds, 0)
+        XCTAssertEqual(restored.lastSampleAt, sample.timestamp)
+        let backup = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: run, includingPropertiesForKeys: nil).first { $0.pathExtension == "partial" })
+        XCTAssertEqual(try Data(contentsOf: backup), tail)
+        try resumed.append(RunSample(kind: "recoveryGap", timestamp: start.addingTimeInterval(40), receivedAt: start,
+                                    fix: nil, heartRate: nil, acceptedForDistance: nil, gapStartedAt: restored.lastSampleAt))
+        try resumed.checkpoint(restored.summary)
+        let written = try Data(contentsOf: file)
+        XCTAssertTrue(written.starts(with: original))
+        XCTAssertEqual(written.split(separator: 10).count, 2)
+        var distance = DistanceAccumulator(meters: restored.summary.distanceMeters)
+        XCTAssertTrue(distance.consume(fix(31, seconds: 40), receivedAt: start.addingTimeInterval(40)))
+        XCTAssertEqual(distance.meters, 14, "The first fix after recovery must not bridge the gap.")
+    }
+
     private func fix(_ latitude: Double = 30, seconds: Double = 0, accuracy: Double = 5) -> GPSFix {
         GPSFix(timestamp: start.addingTimeInterval(seconds), latitude: latitude, longitude: 120, accuracy: accuracy)
     }

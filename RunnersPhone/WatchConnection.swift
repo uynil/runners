@@ -155,9 +155,14 @@ final class WatchConnection: NSObject, ObservableObject, WCSessionDelegate {
     }
     #endif
 
-    func removeFromWatch(_ id: UUID) {
+    func hasPendingRemoval(_ id: UUID) -> Bool { pendingRemovals[id] != nil }
+
+    func removeFromWatch(_ id: UUID, expected: String? = nil) {
         guard let session, activated, paired, installed, let receipt = receipts[id] else {
             error = "需要有效的 Watch 地图回执才能移除。"; return
+        }
+        guard expected == nil || expected == receipt.checksum else {
+            error = "Watch 地图版本已更新，请确认当前地图后再移除。"; return
         }
         let command = pendingRemovals[id] ?? MapRemovalCommand(mapID: id, expectedChecksum: receipt.checksum)
         do {
@@ -291,12 +296,13 @@ final class WatchConnection: NSObject, ObservableObject, WCSessionDelegate {
 
     nonisolated func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
         let raw = fileTransfer.file.metadata?["routeID"] as? String
+        let checksum = fileTransfer.file.metadata?["checksum"] as? String
         let message = error?.localizedDescription
         if error == nil, fileTransfer.file.fileURL.deletingLastPathComponent().lastPathComponent == "Outbox" {
             try? FileManager.default.removeItem(at: fileTransfer.file.fileURL)
         }
         Task { @MainActor in
-            if let raw, let id = UUID(uuidString: raw), self.receipts[id] == nil || message != nil {
+            if let raw, let id = UUID(uuidString: raw), self.receipts[id]?.checksum != checksum {
                 self.transfers[id] = message.map { "传输失败：\($0)" } ?? "文件已传送，等待 Watch 校验确认"
             }
         }

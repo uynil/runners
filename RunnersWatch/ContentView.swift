@@ -154,8 +154,11 @@ private struct RunControls: View {
                             .font(.system(size: 14, weight: .semibold)).frame(maxWidth: .infinity, minHeight: 42)
                     }.buttonStyle(.plain).foregroundStyle(RunStyle.coral)
                         .background(RunStyle.coral.opacity(0.15), in: RoundedRectangle(cornerRadius: 14))
-                } else if recorder.phase == .authorizing || recorder.phase == .starting || recorder.phase == .saving {
-                    ProgressView(recorder.phase == .saving ? "正在保存运动" : "正在准备运动")
+                } else if recorder.phase == .authorizing || recorder.phase == .starting || recorder.phase == .saving || recorder.phase == .recovering {
+                    ProgressView(RunReadout.phase(recorder.phase))
+                    if recorder.phase == .recovering, recorder.message != nil {
+                        Button("重试接续") { recorder.recoverIfNeeded() }
+                    }
                 } else {
                     if let summary = recorder.summary {
                         VStack(alignment: .leading, spacing: 4) {

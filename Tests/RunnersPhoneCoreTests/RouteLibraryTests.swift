@@ -2,6 +2,58 @@ import XCTest
 @testable import RunnersPhoneCore
 
 final class RouteLibraryTests: XCTestCase {
+    func testElevationProfileBreaksAtMissingPointsAndSegments() throws {
+        let route = try parse("""
+        <gpx><trk><trkseg>
+        <trkpt lat="30" lon="120"><ele>100</ele></trkpt>
+        <trkpt lat="30" lon="120.001"><ele>125</ele></trkpt>
+        <trkpt lat="30" lon="120.002"><ele>NaN</ele></trkpt>
+        <trkpt lat="30" lon="120.003"><ele>300</ele></trkpt>
+        <trkpt lat="30" lon="120.004"><ele>280</ele></trkpt></trkseg>
+        <trkseg><trkpt lat="31" lon="120"><ele>-10</ele></trkpt>
+        <trkpt lat="31" lon="120.001"><ele>0</ele></trkpt></trkseg></trk></gpx>
+        """)[0]
+        let profile = try XCTUnwrap(RouteElevationProfile(route: route))
+        XCTAssertEqual(profile.segments.map(\.count), [2,2,2])
+        XCTAssertEqual(profile.ascentMeters, 35)
+        XCTAssertEqual(profile.descentMeters, 20)
+        XCTAssertEqual(profile.minimumMeters, -10)
+        XCTAssertLessThan(profile.coverage, 1)
+        var reversed = route
+        reversed.reverseDirection()
+        let reverseProfile = try XCTUnwrap(RouteElevationProfile(route: reversed))
+        XCTAssertEqual(reverseProfile.ascentMeters, profile.descentMeters)
+        XCTAssertEqual(reverseProfile.descentMeters, profile.ascentMeters)
+    }
+
+    func testBackfillRequiresMatchingGeometryAndKeepsOriginalRouteIdentity() throws {
+        let route = try parse("""
+        <gpx><rte><rtept lat="30" lon="120"/><rtept lat="30" lon="120"><ele>14</ele></rtept>
+        <rtept lat="30.001" lon="120"><ele>25</ele></rtept></rte></gpx>
+        """)[0]
+        var saved = route
+        saved.segments = saved.segments.map { $0.map { RoutePoint(latitude: $0.latitude, longitude: $0.longitude) } }
+        saved.name = "My route"; saved.isFavorite = true; saved.reverseDirection()
+        XCTAssertNil(RouteElevationProfile(route: saved))
+        var unrelated = route; unrelated.segments[0][0].longitude += 0.001
+        XCTAssertFalse(saved.addElevation(from: [unrelated]))
+        XCTAssertTrue(saved.addElevation(from: [unrelated, route]))
+        XCTAssertEqual(saved.id, route.id)
+        XCTAssertEqual(saved.name, "My route")
+        XCTAssertTrue(saved.isFavorite)
+        XCTAssertEqual(saved.segments[0].map(\.elevationMeters), [25,14])
+    }
+
+    func testKMLClampedAndRelativeHeightsAreNotTerrainElevation() throws {
+        let routes = try parse("""
+        <kml><Placemark><LineString><coordinates>120,30,100 120,30.01,105</coordinates></LineString></Placemark>
+        <Placemark><LineString><altitudeMode>relativeToGround</altitudeMode><coordinates>120,30,100 120,30.01,105</coordinates></LineString></Placemark>
+        <Placemark><LineString><altitudeMode>absolute</altitudeMode><coordinates>120,30,100 120,30.01,105</coordinates></LineString></Placemark></kml>
+        """)
+        XCTAssertNil(RouteElevationProfile(route: routes[0]))
+        XCTAssertNil(RouteElevationProfile(route: routes[1]))
+        XCTAssertEqual(RouteElevationProfile(route: routes[2])?.ascentMeters, 5)
+    }
     func testReverseDirectionPreservesGapsAndReversesConfirmedTurns() throws {
         var route = try XCTUnwrap(parse("""
         <gpx><trk><trkseg><trkpt lat="30" lon="120"/><trkpt lat="30.001" lon="120"/></trkseg>

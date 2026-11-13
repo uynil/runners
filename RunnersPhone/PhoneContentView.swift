@@ -181,6 +181,8 @@ private struct RouteDetailView: View {
     @State private var deleting = false
     @State private var confirmDownload = false
     @State private var confirmMapDelete = false
+    @State private var importingElevation = false
+    @State private var readingElevation = false
 
     var body: some View {
         if let route = store.routes.first(where: { $0.id == id }) {
@@ -200,7 +202,13 @@ private struct RouteDetailView: View {
                     LabeledContent("分段", value: "\(route.segments.count)")
                     LabeledContent("位置点", value: "\(route.pointCount)")
                     LabeledContent("来源文件", value: route.sourceName)
-                    LabeledContent("爬升", value: "暂无有效数据")
+                    if let profile = RouteElevationProfile(route: route) {
+                        RouteElevationView(profile: profile)
+                    } else {
+                        LabeledContent("爬升", value: "暂无有效数据")
+                        Button("从原线路文件补充海拔") { importingElevation = true }
+                            .disabled(readingElevation || maps.isBusy(id))
+                    }
                     LabeledContent("导航方向", value: route.isReversed == true ? "反向" : "原始方向")
                     Button("反转导航方向", systemImage: "arrow.left.arrow.right") {
                         var updated = route
@@ -218,6 +226,9 @@ private struct RouteDetailView: View {
                         LabeledContent("地图要素", value: "\(bundle.map.features.count)")
                         let packet = RouteMapBundle(route: route, map: bundle.map)
                         Text(watch.status(for: packet)).font(.caption)
+                        let confirmed = (route.cues ?? []).filter(\.confirmed).count
+                        Text(confirmed == 0 ? "路口提示未准备：没有已核验路口" : "当前线路有 \(confirmed) 个已核验路口")
+                            .font(.caption).foregroundStyle(.secondary)
                         Button("发送线路和地图到 Watch") { watch.send(packet) }
                             .disabled(!watch.activated || !watch.paired || !watch.installed)
                     }
@@ -255,6 +266,21 @@ private struct RouteDetailView: View {
             .navigationTitle(route.name)
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $confirmDownload) { MapSelectionView(route: route) }
+            .fileImporter(isPresented: $importingElevation, allowedContentTypes: PhoneStore.importTypes) { result in
+                readingElevation = true
+                Task {
+                    defer { readingElevation = false }
+                    do {
+                        let url = try result.get()
+                        let candidates = try await Task.detached(priority: .userInitiated) { try PhoneStore.readFile(url) }.value
+                        guard var saved = store.routes.first(where: { $0.id == id }), saved.addElevation(from: candidates),
+                              RouteElevationProfile(route: saved) != nil else {
+                            throw RouteImportError.invalid("所选文件与当前线路不匹配，或没有连续有效海拔。")
+                        }
+                        store.update(saved)
+                    } catch { store.error = error.localizedDescription }
+                }
+            }
             .confirmationDialog("删除手机离线地图？", isPresented: $confirmMapDelete, titleVisibility: .visible) {
                 Button("删除手机地图", role: .destructive) { maps.remove(id) }
             } message: { Text("此线路的手机地图将移除，Watch 上已接收的副本不受影响。") }
@@ -282,6 +308,14 @@ private struct RouteDetailView: View {
 
 private struct WatchManagementView: View {
     @EnvironmentObject private var watch: WatchConnection
+    @EnvironmentObject private var store: PhoneStore
+    @EnvironmentObject private var maps: OfflineMapStore
+    @State private var removing: MapReceipt?
+    private var canSync: Bool { watch.activated && watch.paired && watch.installed }
+    private var transferIDs: [UUID] {
+        Set(watch.transfers.keys).union(watch.removals.keys).filter { watch.receipts[$0] == nil }
+            .sorted { name(for: $0) < name(for: $1) }
+    }
     var body: some View {
         List {
             Section {
@@ -304,16 +338,71 @@ private struct WatchManagementView: View {
                     LabeledContent("报告时间") { Text(report.reportedAt, style: .relative) }
                 } else { LabeledContent("可用空间", value: "尚无表端报告") }
                 LabeledContent("表端已确认地图包", value: "\(watch.receipts.count)")
-                ForEach(Array(watch.receipts.values).sorted { $0.receivedAt > $1.receivedAt }, id: \.routeID) { receipt in
-                    VStack(alignment: .leading) {
-                        Text("地图包 \(receipt.routeID.uuidString.prefix(8))").font(.caption)
-                        Text(receipt.receivedAt, style: .date).font(.caption2).foregroundStyle(.secondary)
+            } header: { Text("表端存储与内容") } footer: { Text("清单和空间来自 Watch 最近一次报告，断连时可能过时。地图占用不包含运动记录。") }
+            Section("表端地图") {
+                if watch.receipts.isEmpty { Text("尚无 Watch 已保存的地图回执") }
+                ForEach(watch.receipts.values.sorted { $0.receivedAt > $1.receivedAt }, id: \.routeID) { receipt in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(receipt.routeName ?? name(for: receipt.routeID)).font(.headline)
+                        LabeledContent("表端确认") { Text(receipt.receivedAt, style: .relative) }
+                            .font(.caption).foregroundStyle(.secondary)
+                        controls(receipt.routeID)
+                        if !watch.hasPendingRemoval(receipt.routeID) {
+                            Button("从 Watch 移除", role: .destructive) { removing = receipt }
+                                .disabled(!canSync || watch.hasTransfer(receipt.routeID))
+                        }
+                    }.buttonStyle(.bordered).padding(.vertical, 4)
+                }
+            }
+            if !transferIDs.isEmpty {
+                Section("同步任务") {
+                    ForEach(transferIDs, id: \.self) { id in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(name(for: id)).font(.headline)
+                            controls(id)
+                        }.buttonStyle(.bordered).padding(.vertical, 4)
                     }
                 }
-            } header: { Text("表端存储与内容") } footer: { Text("清单和空间来自 Watch 最近一次报告，断连时可能过时。地图占用不包含运动记录。") }
+            }
+            Section {
+                NavigationLink("查看手机地图与下载任务") { MapManagementView() }
+                Button("请求同步运动记录") { watch.requestActivitySync() }.disabled(!canSync)
+            }
         }
         .navigationTitle("Watch")
         .onAppear { watch.refresh() }
+        .refreshable { watch.refresh() }
+        .confirmationDialog("从 Watch 移除地图？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { receipt in
+            Button("从 Watch 移除", role: .destructive) { watch.removeFromWatch(receipt.routeID, expected: receipt.checksum); removing = nil }
+        } message: { receipt in
+            Text("\(receipt.routeName ?? name(for: receipt.routeID)) 的手机副本保留。运动中会延后执行，收到表端回执后才算完成。")
+        }
+    }
+
+    private func name(for id: UUID) -> String {
+        store.routes.first(where: { $0.id == id })?.name ?? watch.receipts[id]?.routeName
+            ?? maps.bundles[id]?.route.name ?? "地图包 \(id.uuidString.prefix(8))"
+    }
+
+    @ViewBuilder private func controls(_ id: UUID) -> some View {
+        if let map = maps.bundles[id] {
+            let route = store.routes.first(where: { $0.id == id }) ?? map.route
+            let packet = RouteMapBundle(route: route, map: map.map)
+            Text(watch.status(for: packet)).font(.caption).foregroundStyle(.secondary)
+            if !watch.hasTransfer(id), !watch.hasPendingRemoval(id) {
+                Button("重新同步") { watch.send(packet) }.disabled(!canSync)
+            }
+        } else if let status = watch.transfers[id], watch.removals[id] == nil {
+            Text(status).font(.caption).foregroundStyle(.secondary)
+        }
+        if watch.hasTransfer(id) {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                if let fraction = watch.progress(for: id) { ProgressView(value: fraction) }
+            }
+            Button("取消传输") { watch.cancelTransfer(id) }
+        }
+        if let status = watch.removals[id] { Text(status).font(.caption).foregroundStyle(.secondary) }
+        if watch.hasPendingRemoval(id) { Button("重试移除") { watch.removeFromWatch(id) }.disabled(!canSync) }
     }
 }
 

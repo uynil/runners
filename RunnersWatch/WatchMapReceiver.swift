@@ -132,7 +132,8 @@ final class WatchMapReceiver: NSObject, ObservableObject, WCSessionDelegate {
             let receipts = try bundles.map { bundle -> MapReceipt in
                 let data = try Data(contentsOf: Self.storage.fileURL(bundle.id))
                 let savedAt = try Self.storage.fileURL(bundle.id).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? Date()
-                return MapReceipt(routeID: bundle.id, checksum: MapBundleStorage.digest(data), receivedAt: savedAt)
+                return MapReceipt(routeID: bundle.id, checksum: MapBundleStorage.digest(data), receivedAt: savedAt,
+                                  routeName: String(bundle.route.name.prefix(200)))
             }
             let used = try bundles.reduce(Int64(0)) { total, bundle in
                 total + Int64(try Self.storage.fileURL(bundle.id).resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)

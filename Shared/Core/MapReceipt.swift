@@ -20,6 +20,7 @@ struct MapReceipt: Codable {
     let routeID: UUID
     let checksum: String
     let receivedAt: Date
+    var routeName: String? = nil
 }
 
 struct MapStorageReport: Codable {

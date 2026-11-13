@@ -23,6 +23,8 @@ final class RouteImporter: NSObject, XMLParserDelegate {
     private var parsed: [(String, [[RoutePoint]])] = []
     private var count = 0
     private var failure: Error?
+    private var pendingGPXPoint: RoutePoint?
+    private var kmlAltitudeMode: String?
 
     static func read(_ data: Data, sourceName: String) throws -> [PlannedRoute] {
         guard data.count <= maximumBytes else { throw RouteImportError.invalid("文件超过 10 MB，请先拆分线路。") }
@@ -70,13 +72,13 @@ final class RouteImporter: NSObject, XMLParserDelegate {
             name = ""
             segments = []
         }
-        if isSegment { currentSegment = [] }
+        if isSegment { currentSegment = []; kmlAltitudeMode = nil }
         if isGPXPoint {
             guard let lat = Double(attributes["lat"] ?? ""), let lon = Double(attributes["lon"] ?? "") else {
                 fail(parser, "线路包含无效坐标，未导入此文件。")
                 return
             }
-            append(latitude: lat, longitude: lon, parser: parser)
+            pendingGPXPoint = RoutePoint(latitude: lat, longitude: lon)
         }
     }
 
@@ -105,9 +107,20 @@ final class RouteImporter: NSObject, XMLParserDelegate {
 
     func parser(_ parser: XMLParser, didEndElement element: String, namespaceURI: String?, qualifiedName: String?) {
         defer { path.removeLast(); text = "" }
+        if element == "ele" && (path == ["gpx", "trk", "trkseg", "trkpt", "ele"] || path == ["gpx", "rte", "rtept", "ele"]) {
+            pendingGPXPoint?.elevationMeters = RoutePoint.validElevation(Double(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
+        if isGPXPoint, let point = pendingGPXPoint {
+            pendingGPXPoint = nil
+            append(point, parser: parser)
+            if failure != nil { return }
+        }
         if element == "name" && ((format == "gpx" && path.count == 3 && ["trk", "rte"].contains(path[1]))
             || (format == "kml" && path.dropLast().last == "Placemark")) {
             name = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+        }
+        if format == "kml", element == "altitudeMode", path.dropLast().last == "LineString" {
+            kmlAltitudeMode = text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if format == "kml", element == "coordinates", path.dropLast().last == "LineString", path.contains("Placemark") {
             for tuple in text.split(whereSeparator: { $0.isWhitespace }) {
@@ -116,12 +129,17 @@ final class RouteImporter: NSObject, XMLParserDelegate {
                     fail(parser, "KML 包含无效坐标，未导入此文件。")
                     return
                 }
-                append(latitude: lat, longitude: lon, parser: parser)
+                append(RoutePoint(latitude: lat, longitude: lon,
+                                  elevationMeters: values.count == 3 ? RoutePoint.validElevation(Double(values[2])) : nil), parser: parser)
                 if failure != nil { return }
             }
         }
         if isSegment {
             guard currentSegment.count >= 2 else { fail(parser, "线路分段至少需要两个不同的位置点。"); return }
+            // Ground-relative and clamped KML coordinates do not supply absolute elevation.
+            if format == "kml", kmlAltitudeMode != "absolute" {
+                for i in currentSegment.indices { currentSegment[i].elevationMeters = nil }
+            }
             segments.append(currentSegment)
             currentSegment = []
         }
@@ -130,15 +148,16 @@ final class RouteImporter: NSObject, XMLParserDelegate {
         }
     }
 
-    private func append(latitude: Double, longitude: Double, parser: XMLParser) {
-        guard latitude.isFinite, longitude.isFinite, (-90...90).contains(latitude), (-180...180).contains(longitude) else {
+    private func append(_ point: RoutePoint, parser: XMLParser) {
+        guard point.isValid else {
             fail(parser, "坐标超出有效范围，未导入此文件。")
             return
         }
         count += 1
         guard count <= Self.maximumPoints else { fail(parser, "文件超过 100,000 个位置点，请先拆分线路。"); return }
-        let point = RoutePoint(latitude: latitude, longitude: longitude)
-        if currentSegment.last != point { currentSegment.append(point) }
+        if let last = currentSegment.last, last.isSamePosition(as: point) {
+            if last.elevationMeters == nil { currentSegment[currentSegment.count - 1].elevationMeters = point.elevationMeters }
+        } else { currentSegment.append(point) }
     }
 
     func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) {

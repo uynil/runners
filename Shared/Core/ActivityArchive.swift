@@ -13,6 +13,7 @@ struct ActivitySummary: Decodable, Identifiable {
     let activity: String?
     let healthRouteStatus: String?
     let healthDistanceStatus: String?
+    let recoveryCount: Int?
     let metrics: Metrics?
 }
 
@@ -67,7 +68,7 @@ struct ActivityArchive: Codable {
         func close() { if current.count >= 2 { segments.append(current) }; current = [] }
         var previousDate: Date?
         for sample in try samples() {
-            if ["pause", "resume", "interrupted", "stop"].contains(sample.kind) { close(); previousDate = nil }
+            if ["pause", "resume", "recoveryGap", "interrupted", "stop"].contains(sample.kind) { close(); previousDate = nil }
             guard sample.kind == "gps" else { continue }
             guard sample.acceptedForDistance == true, let fix = sample.fix,
                   fix.accuracy.isFinite, (0...20).contains(fix.accuracy) else { close(); previousDate = nil; continue }

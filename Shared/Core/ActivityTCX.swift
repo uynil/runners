@@ -20,6 +20,7 @@ enum ActivityTCX {
             guard sample.timestamp >= summary.startedAt, sample.timestamp <= summary.endedAt! else { continue }
             if ["pause", "stop", "interrupted"].contains(sample.kind) { close(); paused = true; heart = nil; continue }
             if sample.kind == "resume" { close(); paused = false; continue }
+            if sample.kind == "recoveryGap" { close(); heart = nil; continue }
             guard !paused else { continue }
             var position: RoutePoint?, altitude: Double?
             if sample.kind == "heartRate", let value = sample.heartRate, value.isFinite, (1...300).contains(value) {

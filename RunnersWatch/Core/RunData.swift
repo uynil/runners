@@ -27,6 +27,8 @@ struct DistanceAccumulator {
     private(set) var meters: Double = 0
     private var previous: GPSFix?
 
+    init(meters: Double = 0) { self.meters = meters }
+
     mutating func breakSegment() { previous = nil }
 
     mutating func consume(_ fix: GPSFix, receivedAt: Date) -> Bool {
@@ -67,6 +69,8 @@ struct RunSummary: Codable {
     var laps: [WorkoutLap]? = nil
     var healthRouteStatus: String? = nil
     var healthDistanceStatus: String? = nil
+    var lastCheckpointAt: Date? = nil
+    var recoveryCount: Int? = nil
 
     var averagePace: Double? {
         guard distanceMeters >= 10, activeSeconds > 0 else { return nil }
@@ -85,6 +89,7 @@ struct RunSample: Codable {
     var verticalAccuracy: Double? = nil
     var activeEnergyKilocalories: Double? = nil
     var cumulativeDistanceMeters: Double? = nil
+    var gapStartedAt: Date? = nil
 }
 
 enum OutdoorActivity: String, Codable, CaseIterable, Identifiable {
@@ -143,6 +148,10 @@ struct ElevationAccumulator {
     private(set) var ascent: Double = 0
     private(set) var descent: Double = 0
     private(set) var current: Double?
+
+    init(ascent: Double = 0, descent: Double = 0) {
+        self.ascent = ascent; self.descent = descent
+    }
 
     mutating func breakSegment() { anchor = nil; lastDate = nil; current = nil }
 

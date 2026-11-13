@@ -9,6 +9,10 @@ struct WorkoutDetailsView: View {
                 if let summary = recorder.summary {
                     VStack(alignment: .leading, spacing: 10) {
                         Text((summary.activity ?? .running).title).font(.headline)
+                        if let count = summary.recoveryCount, count > 0 {
+                            Text("已接续 \(count) 次 · 缺测处不计距离和活动时间")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                         row("总时长", time(recorder.elapsed(at: timeline.date)))
                         row("活动时间", time(recorder.activeTime(at: timeline.date)))
                         row("GPS 距离", String(format: "%.2f km", summary.distanceMeters / 1000))

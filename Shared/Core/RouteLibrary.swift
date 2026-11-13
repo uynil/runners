@@ -3,6 +3,16 @@ import Foundation
 struct RoutePoint: Codable, Equatable {
     var latitude: Double
     var longitude: Double
+    var elevationMeters: Double? = nil
+
+    func isSamePosition(as other: RoutePoint) -> Bool {
+        latitude == other.latitude && longitude == other.longitude
+    }
+
+    static func validElevation(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, (-12_000...12_000).contains(value) else { return nil }
+        return value
+    }
 
     func distance(to other: RoutePoint) -> Double {
         let r = Double.pi / 180
@@ -47,6 +57,25 @@ struct PlannedRoute: Codable, Identifiable, Equatable {
         }
     }
     var pointCount: Int { segments.reduce(0) { $0 + $1.count } }
+
+    /// Enrich an existing route without replacing its identity, cues or map association.
+    mutating func addElevation(from candidates: [PlannedRoute]) -> Bool {
+        for candidate in candidates {
+            let source = isReversed == true ? candidate.segments.reversed().map { Array($0.reversed()) } : candidate.segments
+            guard source.count == segments.count,
+                  zip(segments, source).allSatisfy({ saved, incoming in
+                      saved.count == incoming.count && zip(saved, incoming).allSatisfy { $0.isSamePosition(as: $1) }
+                  }), source.contains(where: { $0.contains(where: { $0.elevationMeters != nil }) }) else { continue }
+            for i in segments.indices {
+                for j in segments[i].indices {
+                    if let elevation = source[i][j].elevationMeters { segments[i][j].elevationMeters = elevation }
+                }
+            }
+            cuesUpdatedAt = Date() // Also serves as the route revision for map packets.
+            return true
+        }
+        return false
+    }
 }
 
 /// Saves a complete snapshot atomically. Callers publish changes only after a successful write.
